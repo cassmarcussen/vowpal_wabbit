@@ -2,11 +2,14 @@
 #include <exception>
 #include <fstream>
 #include <chrono>
+#include <thread>
 
 #include <boost/program_options.hpp>
 
 #include "vw.h"
 #include "parse_example_json.h"
+#include "parse_example.h"
+#include "io_to_queue.h"
 
 namespace po = boost::program_options;
 
@@ -100,16 +103,23 @@ int main(int argc, char** argv)
   }
 
   size_t bytes = 0;
-  std::vector<std::string> lines;
+  std::vector<std::vector<char>> lines;
+ // std::vector<std::string> lines;
   const auto file_name = vm["data"].as<std::string>();
   std::ifstream file(file_name);
+
   if (file.is_open())
   {
     std::string line;
     while (std::getline(file, line))
     {
       bytes += line.size() * sizeof(std::string::value_type);
-      lines.push_back(std::move(line));
+      //lines.push_back(std::move(line));
+      std::vector<char> byte_array;
+      byte_array.resize(line.size()); // Note: This byte_array is NOT null terminated!
+
+      memcpy(byte_array.data(), line.c_str(), line.size());
+      lines.push_back(byte_array);
     }
     file.close();
   }
@@ -125,14 +135,25 @@ int main(int argc, char** argv)
   }
 
   auto vw = VW::initialize(args, nullptr, false, nullptr, nullptr);
+
+  /*for (std::vector<char>& line : lines)
+  {
+    vw->p->_io_state.io_lines->push(line);
+  }*/
+
+ // std::cout << "vw->p->_io_state.io_lines->size(): " << vw->p->_io_state.io_lines->size() << std::endl;
+
+
   const auto is_multiline = vw->l->is_multiline;
+  std::thread parse_th1;
+  std::thread parse_th2;
 
   const auto start = std::chrono::high_resolution_clock::now();
   if (type == parser_type::text)
   {
     if (is_multiline)
     {
-      multi_ex exs;
+      /*multi_ex exs;
       for (const auto& line : lines)
       {
         if (line.empty() && !exs.empty())
@@ -143,7 +164,10 @@ int main(int argc, char** argv)
 
         auto* ae = &VW::get_unused_example(vw);
         VW::string_view example(line.c_str(), line.size());
-        substring_to_example(vw, ae, example);
+
+        v_array<VW::string_view> words_localcpy = v_init<VW::string_view>();
+        v_array<VW::string_view> parse_name_localcpy = v_init<VW::string_view>();
+        substring_to_example(vw, ae, example, words_localcpy, parse_name_localcpy);
         exs.push_back(ae);
       }
 
@@ -151,18 +175,30 @@ int main(int argc, char** argv)
       {
         VW::finish_example(*vw, exs);
         exs.clear();
-      }
+      }*/
     }
     else
     {
-      for (const auto& line : lines)
+
+      v_array<VW::string_view> words_localcpy = v_init<VW::string_view>();
+      v_array<VW::string_view> parse_name_localcpy = v_init<VW::string_view>();
+
+      for (auto& line : lines)
       {
         example& ae = VW::get_unused_example(vw);
-        VW::string_view example(line.c_str(), line.size());
-        substring_to_example(vw, &ae, example);
+        auto examples = v_init<example*>();
+        examples.push_back(&ae);
+        size_t number;
+        read_features(vw, line, number, examples);
+        VW::string_view example(line.data(), line.size());
+        //substring_to_example(vw, &ae, example, words_localcpy, parse_name_localcpy);
         VW::finish_example(*vw, ae);
       }
     }
+
+   // parse_th1.join();
+   // parse_th2.join();
+
   }
   else
   {
@@ -171,7 +207,7 @@ int main(int argc, char** argv)
     {
       v_array<example*> examples = v_init<example*>();
       examples.push_back(&VW::get_unused_example(vw));
-      VW::read_line_decision_service_json<false>(*vw, examples, const_cast<char*>(line.data()), line.length(), false,
+      VW::read_line_decision_service_json<false>(*vw, examples, const_cast<char*>(line.data()), line.size(), false,
           (VW::example_factory_t)&VW::get_unused_example, (void*)vw, &interaction);
       multi_ex result;
       result.reserve(examples.size());
@@ -184,9 +220,11 @@ int main(int argc, char** argv)
       examples.delete_v();
     }
   }
+
   const auto end = std::chrono::high_resolution_clock::now();
 
   const auto time_in_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
   const auto bytes_per_second = (bytes / static_cast<float>(time_in_microseconds)) * 1e6;
   const auto megabytes_per_second = bytes_per_second / 1e6;
   std::cout << bytes << " bytes parsed in " << time_in_microseconds << "μs" << std::endl;
